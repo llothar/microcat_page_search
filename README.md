@@ -1,6 +1,6 @@
 # page_index
 
-Small full-text search for help pages and websites: one C++20 library made of two header and
+Small full-text search for help pages and small static websites: one C++20 library made of two header and
 two source files, one pair to build an index and one to query it. Searching runs in the app
 or behind FastCGI; highlighting in the page is done by MarkIt (or mark.js) with the exact
 ranges the query returns.
