@@ -1,0 +1,10 @@
+ownership
+borrow checker
+"dangling references"
+Vec::new
+lifetime annotations
+closures capture environment
+xyzzyq
+trait objects dyn
+unsafe
+the
