@@ -12,7 +12,32 @@ ranges the query returns.
 | `tools/page_index_tool.cpp` | Test and benchmark tool (not part of the library) |
 | `test/` | Corpus script, browser verification, validator soundness test, sample pages |
 
-Dependencies: ICU (`icu-uc`), Snowball `libstemmer_c` (tested with 3.2.0).
+Dependencies: ICU's common library (`icu-uc`, tested with 78.3) and Snowball `libstemmer_c`
+(`libstemmer`, tested with 3.2.0), both found with pkg-config.
+
+License: MIT (see `LICENSE`).
+
+## Building and installing
+
+```sh
+PKG_CONFIG_PATH=<icu>/lib/pkgconfig:<libstemmer>/lib/pkgconfig \
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=<prefix> [-DPAGE_INDEX_TOOLS=OFF]
+cmake --build build
+cmake --install build
+```
+
+Installs the static library (`lib/libpage_index.a`, on Windows `lib/page_index.lib`), the two
+headers into `include/page_index/` and `lib/pkgconfig/page_index.pc`, which requires `icu-uc` and
+`libstemmer`. Consumers include `<page_index/page_index_query.h>` and
+`<page_index/page_index_build.h>`. `page_index_tool` (on by default) goes into `bin/`.
+
+The index and every program that searches it must use the same ICU version and data: word
+boundaries come from ICU's rules and dictionaries, and a different ICU can split words
+differently than the index did. ICU needs only this part of its data: the word break rules and
+dictionaries (`brkitr/word*.brk`, `brkitr/*.dict`, `brkitr/*.res`) and `nfkc_cf.nrm`.
+
+Releases: tag `v<version>` and attach the archive `microcat_page_search-<version>.tar.gz` (top
+directory `microcat_page_search-<version>/`) to the GitHub release; package builds pin its SHA-256.
 
 ## Usage
 
