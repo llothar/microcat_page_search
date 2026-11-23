@@ -13,11 +13,11 @@
 
 namespace page_index {
 
-inline constexpr uint32_t format_version    = 1;
+inline constexpr uint32_t format_version    = 2;   // 2: page summary; open() still reads 1
 inline constexpr uint32_t tokenizer_version = 1;
 
 // A hit in the page, counted in UTF-16 code units over the page's text, which is the
-// concatenation of all text nodes under <main> (or <body>) without [data-fs-skip], script
+// concatenation of all text nodes under <main> (or <body>) without [data-index-skip], script
 // and style subtrees. This is how MarkIt's and mark.js's markRanges() count.
 struct Hit_Range {
     uint32_t start;
@@ -32,12 +32,17 @@ struct Page_Hit {
     int tier;                       // title/index-term match: 3 exact, 2 prefix, 1 all words, 0 none
     std::vector<Hit_Range> ranges;  // matched words in document order
     std::string snippet_html;       // HTML-escaped context with <mark> around matched words
+    std::string summary;            // <meta name="description"> of the page; "" if none or format 1
+    std::vector<std::string> contexts_html;   // keyword-in-context lines (Search_Options::context_lines)
+    std::vector<std::string> words; // matched words as the page writes them, distinct, page order
 };
 
 struct Search_Options {
     size_t max_results   = 20;
     size_t max_ranges    = 500;     // per page
     size_t snippet_bytes = 220;     // approximate snippet length in UTF-8 bytes
+    size_t context_lines = 0;       // keyword-in-context lines per hit, 0 = none
+    size_t context_chars = 100;     // approximate length of a context line in characters
 };
 
 class Page_Index {
@@ -57,6 +62,7 @@ public:
     auto page_path(uint32_t page) const -> std::string_view;
     auto page_title(uint32_t page) const -> std::string_view;
     auto page_text(uint32_t page) const -> std::string_view;   // UTF-8
+    auto page_summary(uint32_t page) const -> std::string_view;   // "" if none or format 1
 
 private:
     Page_Index() = default;
@@ -68,6 +74,7 @@ private:
     void* mapping_ = nullptr;      // Windows mapping handle
     std::string language_;
     uint32_t page_count_ = 0;
+    uint32_t page_fields_ = 0;     // u32 per page table entry: format 1 has no summary fields
     uint64_t pages_offset_ = 0, strings_offset_ = 0, records_offset_ = 0, text_offset_ = 0;
     double average_words_ = 1.0;
 };
@@ -103,7 +110,7 @@ private:
 };
 
 // Index file layout (little-endian), shared with the build side:
-//   header (96 bytes) | page table (page_count × 14 × u32) | strings | records | text
+//   header (96 bytes) | page table (page_count × 16 × u32; format 1: 14) | strings | records | text
 // Records per page: [advance u8][weight:2 | stem length:6][stem bytes]. Advance is in UTF-8 bytes
 // of the page text from the previous record's start. Length 0 + weight 0 = stop word,
 // length 0 + weight 3 = filler (advance only, no word position).
@@ -115,7 +122,9 @@ enum Header_Offset : size_t {   // byte offsets in the header; u32 up to h_pages
 };
 enum Page_Field : uint32_t {
     path_off, path_len, title_off, title_len, ftitle_off, ftitle_len, terms_off, terms_len,
-    records_off, records_len, word_count, text_off, text_len, prior_milli, page_fields
+    records_off, records_len, word_count, text_off, text_len, prior_milli,
+    page_fields_v1,                       // format 1 ends here
+    summary_off = page_fields_v1, summary_len, page_fields
 };
 inline constexpr size_t max_stem_bytes = 63;
 inline constexpr uint8_t record_filler = 0xC0;

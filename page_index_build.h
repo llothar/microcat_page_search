@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <functional>
 #include <vector>
 
 namespace page_index {
@@ -30,10 +31,18 @@ struct Build_Report {
 // output_path is not affected by base_directory.
 //
 // What is indexed: the text of <main> (or <body> if there is no <main>), without elements that
-// carry a data-fs-skip attribute and without script, style and template. Weights: h1-h6,
+// carry a data-index-skip attribute and without script, style and template. Weights: h1-h6,
 // figcaption/caption, em/strong/b/i/mark. Title from <title>, index terms from
 // <meta name="keywords" content="a, b">, ranking prior from <meta name="search-prior" content="0.5">.
 auto build_index(const std::vector<std::string>& files, const std::string& base_directory, std::string_view language,
+                 const std::string& output_path, Build_Report* report = nullptr, std::string* error = nullptr) -> bool;
+
+// The same, with the pages supplied by a reader instead of files on disk, e.g. straight from a
+// zip archive. read(path, html) fills html with the page given as path in files and returns false
+// if it cannot (the build then fails). It is called once per page, in the order of files, on the
+// calling thread.
+using Page_Reader = std::function<bool(const std::string& path, std::string& html)>;
+auto build_index(const std::vector<std::string>& files, const Page_Reader& read, std::string_view language,
                  const std::string& output_path, Build_Report* report = nullptr, std::string* error = nullptr) -> bool;
 
 enum class Issue_Level : uint8_t { error, warning };

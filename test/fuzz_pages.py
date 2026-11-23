@@ -16,7 +16,7 @@ valid = [
     lambda: f"<table>\n<tr><th>{w(1)}</th><td>{w(2)}</td></tr>\n</table>\n",
     lambda: f"<table><tbody><tr><td>{w(1)}</td></tr></tbody></table>\n",
     lambda: f"<figure><img src=\"a.png\" alt=\"{w(1)}\"><figcaption>{w(2)}</figcaption></figure>\n",
-    lambda: f"<div data-fs-skip=\"\"><p>{w(2)}</p></div>\n",
+    lambda: f"<div data-index-skip=\"\"><p>{w(2)}</p></div>\n",
     lambda: f"<svg width=\"10\" height=\"10\"><text x=\"0\" y=\"9\">{w(1)}</text><rect width=\"1\" height=\"1\"/></svg>\n",
     lambda: f"<p>{w(2)}<br>{w(2)}</p>\n",
     lambda: f"<!-- comment with <main> and <p> inside -->\n",
@@ -55,7 +55,7 @@ invalid = [
     lambda: f"<p>{w(1)} BAD_UTF8 {w(1)}</p>\n",
     lambda: f"<p>Vec<T> {w(1)}</p>\n",
     lambda: f"<p data-x=\"1\" data-x=\"2\">{w(1)}</p>\n",
-    lambda: f"<p>{w(1)}</p>\n<p data-fs-skip=\"\"><div>{w(1)}</div></p>\n",
+    lambda: f"<p>{w(1)}</p>\n<p data-index-skip=\"\"><div>{w(1)}</div></p>\n",
     lambda: f"<select><b>{w(1)}</b><option>{w(1)}</option></select>\n",
     lambda: f"<svg><p>{w(1)}</p></svg>\n",
     lambda: f"<p hidden>{w(1)}</p>\n",
@@ -71,7 +71,7 @@ for i in range(count):
     body = "".join(parts)
     main = f"<main>\n{body}</main>\n" if use_main else body
     page = (f"<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n{charset}\n<title>{w(2)}</title>\n</head>\n"
-            f"<body>\n<nav data-fs-skip=\"\"><a href=\"index.html\">Home</a></nav>\n{main}"
-            f"<footer data-fs-skip=\"\">footer</footer>\n</body>\n</html>\n")
+            f"<body>\n<nav data-index-skip=\"\"><a href=\"index.html\">Home</a></nav>\n{main}"
+            f"<footer data-index-skip=\"\">footer</footer>\n</body>\n</html>\n")
     data = page.encode("utf-8").replace(b"BAD_UTF8", b"\xff\xc3(")
     open(os.path.join(out, f"page{i:03d}.html"), "wb").write(data)

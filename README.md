@@ -1,6 +1,6 @@
 # page_index
 
-Small full-text search for help pages and small static websites: one C++20 library made of two header and
+Small full-text search for help pages and websites: one C++20 library made of two header and
 two source files, one pair to build an index and one to query it. Searching runs in the app
 or behind FastCGI; highlighting in the page is done by MarkIt (or mark.js) with the exact
 ranges the query returns.
@@ -51,10 +51,20 @@ if (!page_index::build_index(files, "/srv/site", "en", "site.en.idx", &report, &
     fail(error);
 for (const auto& w : report.warnings) log(w);       // read these: they point at offset problems
 
+// The pages can also come from a reader instead of files, e.g. straight out of a zip archive:
+// read(path, html) is called once per page, in the order of files, on the calling thread.
+page_index::build_index(files, [&](const std::string& path, std::string& html) { return zip.read(path, html); },
+                        "en", "help.en.idx", &report, &error);
+
 // Query, e.g. in the FastCGI worker: open once, search per request (thread-safe)
 auto index = page_index::Page_Index::open("site.en.idx", &error);
-for (const page_index::Page_Hit& hit : index->search(query_text)) {
+page_index::Search_Options options;
+options.context_lines = 3;                          // keyword-in-context lines per hit
+for (const page_index::Page_Hit& hit : index->search(query_text, options)) {
     // hit.path, hit.title, hit.snippet_html (escaped, <mark> around matches)
+    // hit.summary: the page's <meta name="description"> (format 2)
+    // hit.contexts_html: up to context_lines lines around matches, escaped, with <mark>
+    // hit.words: the matched words as the page writes them (to highlight them in the page)
     // hit.ranges: {start, length} in UTF-16 units → put into the result link
 }
 ```
@@ -63,13 +73,13 @@ In the result page:
 
 ```js
 import { markit } from "./third_party/markit/index.js";   // @markitjs/core, vendored
-// link: page.html#fs-hl=1124.7,3045.10
-const ranges = location.hash.slice(7).split(",").map(r => {
+// link: page.html#index-hl=1124.7,3045.10
+const ranges = location.hash.slice(10).split(",").map(r => {
   const [start, length] = r.split(".").map(Number);
   return { start, length };
 });
 markit(document.querySelector("main")).markRanges(ranges, {
-  exclude: ["[data-fs-skip]", "script", "style"],   // must match what the build skips
+  exclude: ["[data-index-skip]", "script", "style"],   // must match what the build skips
 });
 ```
 
@@ -90,7 +100,7 @@ The index stores, per page, exactly the text the browser's DOM holds under the r
 so the ranges are valid for `markRanges()` without any rules on the JavaScript side.
 
 - **Root:** the first `<main>`, otherwise `<body>`.
-- **Skipped:** elements with a `data-fs-skip` attribute (whole subtree), `script`, `style`,
+- **Skipped:** elements with a `data-index-skip` attribute (whole subtree), `script`, `style`,
   `template`. Give MarkIt the same `exclude` list.
 - **Entities:** write text as UTF-8. Decoded: `&amp; &lt; &gt; &quot; &apos; &nbsp;`, numeric
   references and about 40 common names (`&copy;`, `&mdash;`, `&hellip;` …). Any other name
@@ -100,7 +110,7 @@ so the ranges are valid for `markRanges()` without any rules on the JavaScript s
   makes "TitleFirst" one string in the DOM. The build still splits words there, so search and
   highlighting work, but snippets show the words glued, and the build warns.
 - **Parser details handled:** CR/LF → LF, the newline right after `<pre>` dropped, raw-text
-  elements. Not handled (keep out of the root or mark `data-fs-skip`): `noscript`, `iframe`
+  elements. Not handled (keep out of the root or mark `data-index-skip`): `noscript`, `iframe`
   content, mis-nested tags, text directly inside `<table>`.
 - **Weights:** `h1`–`h6` heading, `figcaption`/`caption` caption, `em strong b i mark` emphasis.
 - **Page data:** `<title>`, `<meta name="keywords" content="a, b">` (index terms),
@@ -136,7 +146,7 @@ Errors:
 - `<html lang>` not matching the index language, an invalid `search-prior`.
 
 Warnings: no whitespace between adjacent blocks, hidden content (`hidden`, `display:none`)
-not marked `data-fs-skip`, indexed `<textarea>`, no `<main>`, a second `<main>`, missing or
+not marked `data-index-skip`, indexed `<textarea>`, no `<main>`, a second `<main>`, missing or
 empty `<title>`, no `<html lang>`, empty keywords, obsolete elements, noncharacters, no
 indexable text.
 
@@ -173,17 +183,18 @@ Latin accents removed after stemming. Words with `_`, `.`, digits or inner capit
 stemmed. English: possessive `'s` removed, Lucene's 33 stop words (kept as placeholders).
 Other languages: no stop words yet.
 
-## Index file format (version 1)
+## Index file format (version 2)
 
-Little-endian; uncompressed so it can be memory-mapped.
+Little-endian; uncompressed so it can be memory-mapped. `open()` reads version 2 and version 1
+(1.0.0: no summary, 14 fields per page).
 
 ```
 header 96 bytes   magic "PGINDEX1", format version, tokenizer version, language[16],
                   page count, offsets and sizes of the four sections
-page table        per page 14 × u32: path, title, folded title, folded index terms (offset,
+page table        per page 16 × u32: path, title, folded title, folded index terms (offset,
                   length into strings), records offset/length, word count, text offset/length,
-                  prior × 1000
-strings           paths, titles, folded titles, index terms (one per line)
+                  prior × 1000, summary (offset, length into strings; format 1: missing)
+strings           paths, titles, folded titles, index terms (one per line), summaries
 records           per page: [advance u8][weight:2 | stem length:6][stem bytes]
                   advance = UTF-8 bytes from the previous record's start
                   length 0, weight 0 = stop word;  length 0, weight 3 = filler (advance only)
@@ -212,6 +223,23 @@ Highlight API): 111 of 112 pages produce exactly the DOM text, and 1,328 of 1,33
 ranges select exactly the indexed word. The one failing page uses `&vert;`, which the build
 reported as a warning. The library was also run under AddressSanitizer and UBSan, and damaged
 or truncated index files are rejected by `open()`.
+
+## Changes
+
+**1.1.0** (2026-11-23)
+
+- Index format 2: the page summary, `<meta name="description">` with its whitespace collapsed,
+  is stored per page; `Page_Hit::summary`, `Page_Index::page_summary()`. Format 1 files still open.
+- Keyword-in-context lines: `Search_Options::context_lines` and `context_chars`,
+  `Page_Hit::contexts_html`.
+- `Page_Hit::words`: the matched words as the page writes them, distinct, in page order.
+- `build_index()` with a `Page_Reader` (a function that returns a page's HTML) instead of a
+  base directory, e.g. to index pages straight from a zip archive.
+- The validator warns about a missing or empty `<meta name="description">`.
+- The skip attribute is `data-index-skip` (was `data-fs-skip`), the example link fragment
+  `#index-hl=`.
+
+**1.0.0** (2026-11-19): first release.
 
 ## Not done yet
 

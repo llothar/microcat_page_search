@@ -14,9 +14,9 @@ for path in sorted(glob.glob(os.path.join(src, "*.md"))):
     page = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><title>{html.escape(title)}</title>
 <meta name="keywords" content="{keywords}"></head>
-<body><nav data-fs-skip=""><a href="index.html">Contents</a> · <a href="#">Next</a></nav>
+<body><nav data-index-skip=""><a href="index.html">Contents</a> · <a href="#">Next</a></nav>
 <main>{body}</main>
-<footer data-fs-skip="">Rust book test page</footer><script>var x = "<b>not text</b>";</script>
+<footer data-index-skip="">Rust book test page</footer><script>var x = "<b>not text</b>";</script>
 </body></html>
 """
     open(os.path.join(out, name + ".html"), "w", encoding="utf-8").write(page)

@@ -7,7 +7,7 @@ const fs = require('fs'), path = require('path');
 const dir = process.argv[2], markitCode = fs.readFileSync(process.argv[3], 'utf8');
 const texts = JSON.parse(fs.readFileSync(path.join(dir, 'texts.json'), 'utf8'));
 const results = JSON.parse(fs.readFileSync(path.join(dir, 'results.json'), 'utf8'));
-const exclude = ['[data-fs-skip]', 'script', 'style'];
+const exclude = ['[data-index-skip]', 'script', 'style'];
 (async () => {
   const browser = await chromium.launch({ executablePath: process.env.CHROME || '/usr/bin/google-chrome', args: ['--no-sandbox'] });
   const page = await browser.newPage();

@@ -86,6 +86,23 @@ auto lower(std::string_view s) -> std::string
 }
 
 auto is_ws(char c) -> bool { return c == ' ' || c == '\n' || c == '\t' || c == '\f' || c == '\r'; }
+
+// Runs of whitespace as one space, none at the ends (the summary is shown as one line).
+auto collapse_whitespace(std::string_view text) -> std::string
+{
+    std::string out;
+    for (char c : text) {
+        if (is_ws(c)) {
+            if (!out.empty() && out.back() != ' ')
+                out += ' ';
+        } else {
+            out += c;
+        }
+    }
+    if (!out.empty() && out.back() == ' ')
+        out.pop_back();
+    return out;
+}
 auto is_alpha(char c) -> bool { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
 
 struct Page_Text {
@@ -93,6 +110,7 @@ struct Page_Text {
     std::vector<uint8_t> weight;    // per text byte: 0 body, 1 emphasis, 2 caption, 3 heading
     std::vector<uint32_t> blocks;   // text offsets of block element boundaries (words never cross them)
     std::string title;
+    std::string summary;            // <meta name="description">
     std::vector<std::string> keywords;
     float prior = 1.0f;
     std::string lang;
@@ -328,6 +346,8 @@ private:
             std::string meta = lower(*attribute("name"));
             if (meta == "keywords")
                 split_keywords(*attribute("content"));
+            if (meta == "description" && out_.summary.empty())
+                out_.summary = collapse_whitespace(*attribute("content"));
             if (meta == "search-prior")
                 out_.prior = std::clamp(std::strtof(attribute("content")->c_str(), nullptr), 0.0f, 100.0f);
         }
@@ -349,7 +369,7 @@ private:
         if (is_one_of(name, raw_text_elements)) {
             std::string content(raw_content(name));
             if (stack_.back().in_root && !stack_.back().skip && !content.empty())
-                warn("<" + name + "> content is a text node in the browser and is indexed raw; mark it data-fs-skip");
+                warn("<" + name + "> content is a text node in the browser and is indexed raw; mark it data-index-skip");
             emit_text(content, false);
             return;
         }
@@ -366,7 +386,7 @@ private:
             weight = std::max<uint8_t>(weight, 2);
         else if (name == "em" || name == "strong" || name == "b" || name == "i" || name == "mark")
             weight = std::max<uint8_t>(weight, 1);
-        bool skip = parent.skip || attribute("data-fs-skip") || name == "template" || name == "head";
+        bool skip = parent.skip || attribute("data-index-skip") || name == "template" || name == "head";
         bool in_root = parent.in_root || (!root_seen_ && name == root_);
         root_seen_ = root_seen_ || name == root_;
         stack_.push_back(Open{name, weight, skip, in_root, foreign});
@@ -985,7 +1005,7 @@ private:
         }
         if (is_one_of(name, not_in_root)) {
             if (in_root_now && mode_ == Mode::in_body)
-                error(at, "<" + name + "> inside the indexed root: its content is raw text in the DOM; mark it data-fs-skip");
+                error(at, "<" + name + "> inside the indexed root: its content is raw text in the DOM; mark it data-index-skip");
             raw(name, at, false);
             return;
         }
@@ -994,15 +1014,15 @@ private:
         bool is_void = is_one_of(name, void_elements);
         if (self_closing && !is_void && !foreign_parent && name != "svg" && name != "math")
             error(at, "<" + name + "/> is not self-closing in HTML: the element stays open; write <" + name + "></" + name + ">");
-        if (attribute(attributes, "data-fs-skip") && is_void)
-            warning(at, "data-fs-skip on a void element has no effect");
-        if (in_root_now && !attribute(attributes, "data-fs-skip")) {
+        if (attribute(attributes, "data-index-skip") && is_void)
+            warning(at, "data-index-skip on a void element has no effect");
+        if (in_root_now && !attribute(attributes, "data-index-skip")) {
             const std::string* style = attribute(attributes, "style");
             std::string css = style ? lower(*style) : "";
             css.erase(std::remove_if(css.begin(), css.end(), is_ws), css.end());
             if (attribute(attributes, "hidden") || css.find("display:none") != std::string::npos ||
                 css.find("visibility:hidden") != std::string::npos)
-                warning(at, "hidden content is indexed and highlighted invisibly; mark it data-fs-skip");
+                warning(at, "hidden content is indexed and highlighted invisibly; mark it data-index-skip");
         }
         if (is_one_of(name, block_elements))
             block_boundary();
@@ -1014,12 +1034,12 @@ private:
     auto push(const std::string& name, const Attributes& attributes, size_t at) -> void
     {
         const Open* parent = top();
-        bool skip = (parent && parent->skip) || attribute(attributes, "data-fs-skip") || name == "template";
+        bool skip = (parent && parent->skip) || attribute(attributes, "data-index-skip") || name == "template";
         bool is_root = !root_seen_ && name == root_;
         if (is_root) {
             root_seen_ = true;
             if (skip)
-                warning(at, "the indexed root <" + name + "> is inside or carries data-fs-skip: nothing is indexed");
+                warning(at, "the indexed root <" + name + "> is inside or carries data-index-skip: nothing is indexed");
         } else if (name == "main") {
             warning(at, "second <main>: only the first one is indexed");
         }
@@ -1110,6 +1130,11 @@ private:
         }
         if (name && lower(*name) == "keywords" && (!content || content->find_first_not_of(" ,") == std::string::npos))
             warning(at, "empty keywords");
+        if (name && lower(*name) == "description") {
+            has_description_ = true;
+            if (!content || content->find_first_not_of(" \t\n\r\f") == std::string::npos)
+                warning(at, "empty description: results show no summary");
+        }
     }
 
     auto finish() -> void
@@ -1126,6 +1151,8 @@ private:
             error(0, "missing <meta charset=\"utf-8\"> in the first 1024 bytes: the browser may guess another encoding");
         if (titles_ == 0)
             warning(0, "no <title>: results show the path");
+        if (!has_description_)
+            warning(0, "no <meta name=\"description\">: results show no summary");
         if (!has_lang_)
             warning(0, "no <html lang>: the browser does not know the page language");
         else if (!language_.empty() && lower(lang_).substr(0, 2) != lower(language_).substr(0, 2))
@@ -1148,6 +1175,7 @@ private:
     size_t pos_ = 0;
     size_t indexed_bytes_ = 0;
     int titles_ = 0;
+    bool has_description_ = false;
     std::string lang_;
     bool has_lang_ = false;
     bool seen_doctype_ = false;
@@ -1262,6 +1290,25 @@ auto set_error(std::string* error, std::string message) -> bool
 auto build_index(const std::vector<std::string>& files, const std::string& base_directory, std::string_view language,
                  const std::string& output_path, Build_Report* report, std::string* error) -> bool
 {
+    Base_Directory base(base_directory);
+    if (!base.ok())
+        return set_error(error, "cannot open base directory " + base_directory);
+    std::string failed;
+    auto read = [&](const std::string& path, std::string& html) -> bool {
+        if (base.read(path, html))
+            return true;
+        failed = path;
+        return false;
+    };
+    bool ok = build_index(files, read, language, output_path, report, error);
+    if (!ok && !failed.empty() && error)
+        *error = "cannot read " + failed + (base_directory.empty() ? "" : " in " + base_directory);
+    return ok;
+}
+
+auto build_index(const std::vector<std::string>& files, const Page_Reader& read, std::string_view language,
+                 const std::string& output_path, Build_Report* report, std::string* error) -> bool
+{
     Build_Report local;
     Build_Report& r = report ? *report : local;
     r = Build_Report{};
@@ -1269,10 +1316,6 @@ auto build_index(const std::vector<std::string>& files, const std::string& base_
         return set_error(error, "language must be 1 to 15 characters");
     if (files.size() > std::numeric_limits<uint32_t>::max())
         return set_error(error, "too many files");
-
-    Base_Directory base(base_directory);
-    if (!base.ok())
-        return set_error(error, "cannot open base directory " + base_directory);
 
     detail::Analyzer analyzer(language);
     std::string strings, records, text;
@@ -1286,8 +1329,8 @@ auto build_index(const std::vector<std::string>& files, const std::string& base_
     };
 
     for (const std::string& path : files) {
-        if (!base.read(path, html))
-            return set_error(error, "cannot read " + path + (base_directory.empty() ? "" : " in " + base_directory));
+        if (!read(path, html))
+            return set_error(error, "cannot read " + path);
         Page_Text page = Html_Extractor::extract(html, r.warnings, path);
         if (!page.lang.empty() && lower(page.lang).substr(0, 2) != lower(language).substr(0, 2))
             r.warnings.push_back(path + ": <html lang=\"" + page.lang + "\"> differs from the index language");
@@ -1336,6 +1379,7 @@ auto build_index(const std::vector<std::string>& files, const std::string& base_
         auto [title_off, title_len] = add_string(page.title);
         auto [ftitle_off, ftitle_len] = add_string(analyzer.fold(page.title));
         auto [terms_off, terms_len] = add_string(keywords);
+        auto [summary_off, summary_len] = add_string(page.summary);
         std::array<uint32_t, detail::page_fields> entry{};
         entry[detail::path_off] = path_off;
         entry[detail::path_len] = path_len;
@@ -1351,6 +1395,8 @@ auto build_index(const std::vector<std::string>& files, const std::string& base_
         entry[detail::text_off] = static_cast<uint32_t>(text.size());
         entry[detail::text_len] = static_cast<uint32_t>(page.text.size());
         entry[detail::prior_milli] = static_cast<uint32_t>(page.prior * 1000.0f + 0.5f);
+        entry[detail::summary_off] = summary_off;
+        entry[detail::summary_len] = summary_len;
         for (uint32_t v : entry)
             put32(table, v);
         text += page.text;

@@ -255,7 +255,7 @@ auto set_error(std::string* error, std::string message) -> void
 }  // namespace
 
 struct Page_Index::Page {
-    std::string_view path, title, ftitle, terms, text;
+    std::string_view path, title, ftitle, terms, text, summary;
     const uint8_t* records;
     uint32_t records_len, words;
     float prior;
@@ -263,21 +263,24 @@ struct Page_Index::Page {
 
 auto Page_Index::page(uint32_t n) const -> Page
 {
-    const uint8_t* e = data_ + pages_offset_ + size_t(n) * detail::page_fields * 4;
+    const uint8_t* e = data_ + pages_offset_ + size_t(n) * page_fields_ * 4;
     auto f = [e](detail::Page_Field field) { return load32(e + field * 4); };
     auto str = [&](detail::Page_Field off, detail::Page_Field len) {
         return std::string_view(reinterpret_cast<const char*>(data_ + strings_offset_ + f(off)), f(len));
     };
+    std::string_view summary = page_fields_ > detail::summary_len ? str(detail::summary_off, detail::summary_len)
+                                                                  : std::string_view{};
     return Page{str(detail::path_off, detail::path_len), str(detail::title_off, detail::title_len),
                 str(detail::ftitle_off, detail::ftitle_len), str(detail::terms_off, detail::terms_len),
                 std::string_view(reinterpret_cast<const char*>(data_ + text_offset_ + f(detail::text_off)), f(detail::text_len)),
-                data_ + records_offset_ + f(detail::records_off), f(detail::records_len), f(detail::word_count),
+                summary, data_ + records_offset_ + f(detail::records_off), f(detail::records_len), f(detail::word_count),
                 f(detail::prior_milli) / 1000.0f};
 }
 
 auto Page_Index::page_path(uint32_t n) const -> std::string_view { return page(n).path; }
 auto Page_Index::page_title(uint32_t n) const -> std::string_view { return page(n).title; }
 auto Page_Index::page_text(uint32_t n) const -> std::string_view { return page(n).text; }
+auto Page_Index::page_summary(uint32_t n) const -> std::string_view { return page(n).summary; }
 
 auto Page_Index::open(const std::string& path, std::string* error) -> std::unique_ptr<Page_Index>
 {
@@ -331,10 +334,12 @@ auto Page_Index::open(const std::string& path, std::string* error) -> std::uniqu
         set_error(error, path + " is not a page index");
         return nullptr;
     }
-    if (load32(d + detail::h_format) != format_version || load32(d + detail::h_tokenizer) != tokenizer_version) {
+    uint32_t format = load32(d + detail::h_format);
+    if ((format != format_version && format != 1) || load32(d + detail::h_tokenizer) != tokenizer_version) {
         set_error(error, path + " was built by a different format or tokenizer version");
         return nullptr;
     }
+    index->page_fields_ = format == 1 ? detail::page_fields_v1 : detail::page_fields;
     const char* lang = reinterpret_cast<const char*>(d + detail::h_language);
     index->language_.assign(lang, strnlen(lang, 16));
     index->page_count_ = load32(d + detail::h_page_count);
@@ -346,7 +351,7 @@ auto Page_Index::open(const std::string& path, std::string* error) -> std::uniqu
     uint64_t records_size = load64(d + detail::h_records_size);
     uint64_t text_size = load64(d + detail::h_text_size);
     auto inside = [&](uint64_t off, uint64_t len, uint64_t limit) { return off <= limit && len <= limit - off; };
-    uint64_t table_size = uint64_t(index->page_count_) * detail::page_fields * 4;
+    uint64_t table_size = uint64_t(index->page_count_) * index->page_fields_ * 4;
     if (!inside(index->pages_offset_, table_size, index->size_) || !inside(index->strings_offset_, strings_size, index->size_) ||
         !inside(index->records_offset_, records_size, index->size_) || !inside(index->text_offset_, text_size, index->size_)) {
         set_error(error, path + " is truncated or damaged");
@@ -354,14 +359,16 @@ auto Page_Index::open(const std::string& path, std::string* error) -> std::uniqu
     }
     uint64_t total_words = 0;
     for (uint32_t n = 0; n < index->page_count_; ++n) {
-        const uint8_t* e = d + index->pages_offset_ + size_t(n) * detail::page_fields * 4;
+        const uint8_t* e = d + index->pages_offset_ + size_t(n) * index->page_fields_ * 4;
         auto f = [e](detail::Page_Field field) { return uint64_t(load32(e + field * 4)); };
         bool ok = inside(f(detail::path_off), f(detail::path_len), strings_size) &&
                   inside(f(detail::title_off), f(detail::title_len), strings_size) &&
                   inside(f(detail::ftitle_off), f(detail::ftitle_len), strings_size) &&
                   inside(f(detail::terms_off), f(detail::terms_len), strings_size) &&
                   inside(f(detail::records_off), f(detail::records_len), records_size) &&
-                  inside(f(detail::text_off), f(detail::text_len), text_size);
+                  inside(f(detail::text_off), f(detail::text_len), text_size) &&
+                  (index->page_fields_ <= detail::summary_len ||
+                   inside(f(detail::summary_off), f(detail::summary_len), strings_size));
         if (!ok) {
             set_error(error, path + ": page table entry " + std::to_string(n) + " is out of range");
             return nullptr;
@@ -413,10 +420,13 @@ struct Walk_Result {
     uint32_t matched = 0;           // bit per term
     bool phrases_ok = true;
     uint32_t window = 0;            // smallest span of positions holding all matched terms
+    uint32_t first_body = UINT32_MAX;   // offset of the first word that is not in a heading:
+                                        // the headings before it (the H1) are the page's title
     struct Hit {
         uint32_t offset;     // UTF-8 byte offset of the word
         uint32_t terms;      // matched term bits
         uint32_t limit;      // start of the next word record: the word ends there at the latest
+        uint32_t weight;     // 0 body, 1 emphasis, 2 caption, 3 heading
     };
     std::vector<Hit> hits;
 };
@@ -507,6 +517,8 @@ auto walk_page(const uint8_t* r, uint32_t len, uint32_t words, const Query& q, b
             continue;   // filler
         if (collect_hits && !w.hits.empty() && w.hits.back().limit == UINT32_MAX)
             w.hits.back().limit = offset;
+        if (stem_len > 0 && weight != 3 && w.first_body == UINT32_MAX)
+            w.first_body = offset;
         if (stem_len == 0) {
             if (need_positions && pos < words)
                 any_mask[pos] = exact_mask[pos] = stop_bit;
@@ -532,7 +544,7 @@ auto walk_page(const uint8_t* r, uint32_t len, uint32_t words, const Query& q, b
             exact_mask[pos] = exact;
         }
         if (collect_hits && any)
-            w.hits.push_back(Walk_Result::Hit{offset, any, UINT32_MAX});
+            w.hits.push_back(Walk_Result::Hit{offset, any, UINT32_MAX, weight});
         ++pos;
     }
     if (!need_positions)
@@ -627,6 +639,49 @@ auto append_escaped(std::string& out, char c) -> void
     }
 }
 
+// text[start, end) as HTML: whitespace collapsed, matched words in <mark>, "…" where cut.
+auto render_window(std::string_view text, const std::vector<std::pair<uint32_t, uint32_t>>& spans, size_t start,
+                   size_t end, bool cut_before, bool cut_after) -> std::string
+{
+    std::string out;
+    if (cut_before)
+        out += "…";
+    size_t next = 0;
+    while (next < spans.size() && spans[next].first < start)
+        ++next;
+    bool in_mark = false;
+    size_t mark_end = 0;
+    bool pending_space = false;
+    for (size_t i = start; i < end; ++i) {
+        if (in_mark && i == mark_end) {
+            out += "</mark>";
+            in_mark = false;
+        }
+        if (!in_mark && next < spans.size() && i == spans[next].first && spans[next].second <= end) {
+            if (pending_space)
+                out += ' ';
+            pending_space = false;
+            out += "<mark>";
+            in_mark = true;
+            mark_end = spans[next].second;
+            ++next;
+        }
+        if (is_space(text[i])) {
+            pending_space = !out.empty() && out != "…";
+            continue;
+        }
+        if (pending_space)
+            out += ' ';
+        pending_space = false;
+        append_escaped(out, text[i]);
+    }
+    if (in_mark)
+        out += "</mark>";
+    if (cut_after)
+        out += "…";
+    return out;
+}
+
 // Snippet around the densest group of hits; whitespace collapsed, matched words in <mark>.
 auto make_snippet(std::string_view text, const std::vector<std::pair<uint32_t, uint32_t>>& spans,
                   const std::vector<uint32_t>& span_terms, size_t width) -> std::string
@@ -663,42 +718,105 @@ auto make_snippet(std::string_view text, const std::vector<std::pair<uint32_t, u
         end = is_space(text[e]) ? e : utf8_char_start(text, end);
     }
 
-    std::string out;
-    if (start > 0)
-        out += "…";
-    size_t next = 0;
-    while (next < spans.size() && spans[next].first < start)
-        ++next;
-    bool in_mark = false;
-    size_t mark_end = 0;
-    bool pending_space = false;
-    for (size_t i = start; i < end; ++i) {
-        if (in_mark && i == mark_end) {
-            out += "</mark>";
-            in_mark = false;
-        }
-        if (!in_mark && next < spans.size() && i == spans[next].first && spans[next].second <= end) {
-            if (pending_space)
-                out += ' ';
-            pending_space = false;
-            out += "<mark>";
-            in_mark = true;
-            mark_end = spans[next].second;
-            ++next;
-        }
-        if (is_space(text[i])) {
-            pending_space = !out.empty() && out != "…";
-            continue;
-        }
-        if (pending_space)
-            out += ' ';
-        pending_space = false;
-        append_escaped(out, text[i]);
+    return render_window(text, spans, start, end, start > 0, end < text.size());
+}
+
+auto back_chars(std::string_view text, size_t i, size_t count, size_t floor) -> size_t
+{
+    while (count > 0 && i > floor) {
+        --i;
+        while (i > floor && (static_cast<uint8_t>(text[i]) & 0xC0) == 0x80)
+            --i;
+        --count;
     }
-    if (in_mark)
-        out += "</mark>";
-    if (end < text.size())
-        out += "…";
+    return i;
+}
+
+auto forward_chars(std::string_view text, size_t i, size_t count, size_t ceiling) -> size_t
+{
+    while (count > 0 && i < ceiling) {
+        ++i;
+        while (i < ceiling && (static_cast<uint8_t>(text[i]) & 0xC0) == 0x80)
+            ++i;
+        --count;
+    }
+    return i;
+}
+
+// Keyword-in-context lines: about `chars` characters around a matched word each, inside its
+// paragraph (block boundaries are newlines in the text), cut at spaces where there are any.
+// The first occurrence of each query term comes first, then further occurrences; lines do not
+// overlap and appear in page order. Body text comes before headings, which are used only for
+// words found nowhere else. Matches before first_body (the headings the page starts with, i.e.
+// its title) are left out.
+auto make_contexts(std::string_view text, const std::vector<std::pair<uint32_t, uint32_t>>& spans,
+                   const std::vector<uint32_t>& span_terms, const std::vector<uint32_t>& span_weights,
+                   uint32_t first_body, size_t lines, size_t chars) -> std::vector<std::string>
+{
+    struct Window {
+        size_t start, end;
+    };
+    size_t radius = std::max<size_t>(chars / 2, 10);
+    auto window_of = [&](size_t i) -> Window {
+        size_t s = spans[i].first, e = spans[i].second;
+        size_t para_begin = s == 0 ? 0 : text.rfind('\n', s - 1);
+        para_begin = para_begin == std::string_view::npos ? 0 : para_begin + 1;
+        size_t para_end = text.find('\n', e);
+        if (para_end == std::string_view::npos)
+            para_end = text.size();
+        size_t start = back_chars(text, s, radius, para_begin);
+        size_t end = forward_chars(text, e, radius, para_end);
+        if (start > para_begin) {
+            size_t space = start;
+            while (space < s && !is_space(text[space]))
+                ++space;
+            if (space < s)
+                start = space + 1;
+        }
+        if (end < para_end) {
+            size_t space = end;
+            while (space > e && !is_space(text[space]))
+                --space;
+            if (space > e)
+                end = space;
+        }
+        return Window{start, end};
+    };
+
+    std::vector<Window> chosen;
+    auto overlaps = [&](const Window& w) {
+        for (const Window& c : chosen) {
+            if (w.start < c.end && c.start < w.end)
+                return true;
+        }
+        return false;
+    };
+    uint32_t covered = 0;
+    // passes: new terms in body text, new terms anywhere, more body text, anything
+    for (int pass = 0; pass < 4; ++pass) {
+        bool new_terms_only = pass < 2, body_only = pass % 2 == 0;
+        for (size_t i = 0; i < spans.size() && chosen.size() < lines; ++i) {
+            if (spans[i].first < first_body)
+                continue;
+            if (new_terms_only && (span_terms[i] & ~covered) == 0)
+                continue;
+            if (body_only && span_weights[i] == 3)
+                continue;
+            Window w = window_of(i);
+            if (overlaps(w))
+                continue;
+            covered |= span_terms[i];
+            chosen.push_back(w);
+        }
+    }
+    std::sort(chosen.begin(), chosen.end(), [](const Window& a, const Window& b) { return a.start < b.start; });
+
+    std::vector<std::string> out;
+    for (const Window& w : chosen) {
+        bool cut_before = w.start > 0 && text[w.start - 1] != '\n';
+        bool cut_after = w.end < text.size() && text[w.end] != '\n';
+        out.push_back(render_window(text, spans, w.start, w.end, cut_before, cut_after));
+    }
     return out;
 }
 
@@ -827,16 +945,17 @@ auto Page_Index::search(std::string_view text, const Search_Options& options) co
     results.reserve(keep);
     for (const Candidate& c : candidates) {
         Page p = page(c.page);
-        Page_Hit hit{c.page, std::string(p.path), std::string(p.title), c.score, c.tier, {}, {}};
+        Page_Hit hit{c.page, std::string(p.path), std::string(p.title), c.score, c.tier, {}, {}, std::string(p.summary), {}, {}};
         Walk_Result w = nterms ? walk_page(p.records, p.records_len, p.words, q, true) : Walk_Result{};
         std::vector<std::pair<uint32_t, uint32_t>> spans;   // byte start, byte end
-        std::vector<uint32_t> span_terms;
+        std::vector<uint32_t> span_terms, span_weights;
         std::vector<uint32_t> starts;
         for (const Walk_Result::Hit& h : w.hits) {
             if (starts.size() >= options.max_ranges || h.offset >= p.text.size())
                 break;
             starts.push_back(h.offset);
             span_terms.push_back(h.terms);
+            span_weights.push_back(h.weight);
         }
         std::vector<uint32_t> ends = analyzer->word_ends(p.text, starts);
         for (size_t i = 0; i < starts.size(); ++i)   // words split at block boundaries end at the next word
@@ -851,6 +970,14 @@ auto Page_Index::search(std::string_view text, const Search_Options& options) co
         for (size_t i = 0; i < spans.size(); ++i)
             hit.ranges.push_back(Hit_Range{units[2 * i], units[2 * i + 1] - units[2 * i]});
         hit.snippet_html = make_snippet(p.text, spans, span_terms, options.snippet_bytes);
+        if (options.context_lines > 0)
+            hit.contexts_html = make_contexts(p.text, spans, span_terms, span_weights, w.first_body,
+                                              options.context_lines, options.context_chars);
+        for (const auto& [s, e] : spans) {
+            std::string word(p.text.substr(s, e - s));
+            if (!word.empty() && std::find(hit.words.begin(), hit.words.end(), word) == hit.words.end())
+                hit.words.push_back(std::move(word));
+        }
         results.push_back(std::move(hit));
     }
     return results;

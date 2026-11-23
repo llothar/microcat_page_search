@@ -42,8 +42,11 @@ auto print_results(const std::vector<page_index::Page_Hit>& hits, double ms) -> 
     std::printf("{\"ms\": %.3f, \"results\": [\n", ms);
     for (size_t i = 0; i < hits.size(); ++i) {
         const auto& h = hits[i];
-        std::printf("  {\"page\": %u, \"path\": %s, \"title\": %s, \"tier\": %d, \"score\": %.3f,\n   \"snippet\": %s,\n   \"ranges\": [",
-                    h.page, json(h.path).c_str(), json(h.title).c_str(), h.tier, h.score, json(h.snippet_html).c_str());
+        std::printf("  {\"page\": %u, \"path\": %s, \"title\": %s, \"tier\": %d, \"score\": %.3f,\n   \"summary\": %s,\n   \"snippet\": %s,\n   \"contexts\": [",
+                    h.page, json(h.path).c_str(), json(h.title).c_str(), h.tier, h.score, json(h.summary).c_str(), json(h.snippet_html).c_str());
+        for (size_t c = 0; c < h.contexts_html.size(); ++c)
+            std::printf("%s%s", c ? ", " : "", json(h.contexts_html[c]).c_str());
+        std::printf("],\n   \"ranges\": [");
         for (size_t r = 0; r < h.ranges.size(); ++r)
             std::printf("%s[%u,%u]", r ? "," : "", h.ranges[r].start, h.ranges[r].length);
         std::printf("]}%s\n", i + 1 < hits.size() ? "," : "");
@@ -133,7 +136,9 @@ auto main(int argc, char** argv) -> int
     if (command == "query" && argc >= 4) {
         index->search(argv[3]);   // warm up the thread's analyzer
         auto t0 = std::chrono::steady_clock::now();
-        auto hits = index->search(argv[3]);
+        page_index::Search_Options options;
+        options.context_lines = 3;
+        auto hits = index->search(argv[3], options);
         double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         print_results(hits, ms);
         return 0;

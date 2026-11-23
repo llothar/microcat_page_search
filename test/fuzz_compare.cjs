@@ -18,7 +18,7 @@ const failing = new Set(fs.readFileSync(failFile, 'utf8').split('\n').filter(Boo
       let s = '';
       for (let n; (n = w.nextNode());) {
         const p = n.parentElement;
-        if (!['[data-fs-skip]', 'script', 'style'].some(sel => p.closest(sel))) s += n.textContent;
+        if (!['[data-index-skip]', 'script', 'style'].some(sel => p.closest(sel))) s += n.textContent;
       }
       return s;
     });
